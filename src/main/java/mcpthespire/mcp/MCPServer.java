@@ -43,6 +43,8 @@ public class MCPServer implements Runnable {
     // Queue for pending tool calls that need to be executed on the game thread
     private final BlockingQueue<PendingToolCall> pendingToolCalls;
     private final BlockingQueue<Map<String, Object>> toolCallResults;
+    // Serialize tool execution across threads (HTTP worker + game loop)
+    private final Object toolExecutionLock = new Object();
 
     // Pending batch execution state (for execute_actions across multiple frames)
     private PendingBatchExecution pendingBatch = null;
@@ -317,11 +319,15 @@ public class MCPServer implements Runnable {
 
         logger.info("Tool call: " + toolName + " with args: " + arguments);
 
-        // Check if this is a read-only tool that can be executed directly
+        // Check if this is a read-only tool that can be executed directly.
+        // Use a lock so read-only inspection cannot race with game-thread tool execution.
         if (toolHandler.isReadOnlyTool(toolName)) {
             logger.info("Executing read-only tool directly on HTTP thread: " + toolName);
             try {
-                Map<String, Object> result = toolHandler.executeTool(toolName, arguments);
+                Map<String, Object> result;
+                synchronized (toolExecutionLock) {
+                    result = toolHandler.executeTool(toolName, arguments);
+                }
                 return MCPProtocol.buildResponse(id, result);
             } catch (Exception e) {
                 logger.error("Error executing read-only tool: " + toolName, e);
@@ -345,6 +351,7 @@ public class MCPServer implements Runnable {
             logger.info("Tool call completed: " + toolName);
             return MCPProtocol.buildResponse(id, result);
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             return MCPProtocol.buildErrorResponse(id, MCPProtocol.ERROR_INTERNAL, "Tool execution interrupted");
         }
     }
@@ -410,7 +417,10 @@ public class MCPServer implements Runnable {
             }
 
             try {
-                Map<String, Object> result = toolHandler.executeTool(pending.toolName, pending.arguments);
+                Map<String, Object> result;
+                synchronized (toolExecutionLock) {
+                    result = toolHandler.executeTool(pending.toolName, pending.arguments);
+                }
                 toolCallResults.add(result);
                 logger.info("Tool result added to queue");
             } catch (Exception e) {
